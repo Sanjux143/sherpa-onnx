@@ -1,17 +1,19 @@
-name: Build SenseVoice APK from Fork
+name: Build SenseVoice Android APK
 
 on:
-  workflow_dispatch: # Taaki aap manually button daba kar build kar sakein
+  push:
+    branches: [ master ] # Aapki default branch 'master' hai
+  workflow_dispatch:
 
 jobs:
-  build-android:
+  build-apk:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Forked Repo
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
-          submodules: 'recursive' # Sherpa-onnx ke submodules zaroori hain
+          submodules: 'recursive'
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -22,27 +24,31 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Download SenseVoice Model Files
+      - name: Prepare Assets and Download Model
         run: |
-          # Assets folder mein jana jahan model pack hoga
-          cd android/SherpaOnnxSenseVoice/app/src/main/assets
+          # Aapke repo ke hisaab se sahi path
+          ASSETS_DIR="android/SherpaOnnx/app/src/main/assets"
+          mkdir -p $ASSETS_DIR
           
-          # Hugging Face se model aur tokens download karna
-          wget -q https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx
-          wget -q https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt
+          echo "Downloading SenseVoice model files..."
+          # Model aur tokens download
+          wget -q https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx -O $ASSETS_DIR/model.int8.onnx
+          wget -q https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt -O $ASSETS_DIR/tokens.txt
           
-          # Files verify karna
-          ls -lh
+          # Verify files
+          ls -lh $ASSETS_DIR
 
-      - name: Build with Gradle
+      - name: Build Android APK
         run: |
-          cd android/SherpaOnnxSenseVoice
+          cd android/SherpaOnnx
           chmod +x gradlew
-          # Build process start
-          ./gradlew assembleRelease
+          
+          # 'senseVoiceRelease' flavor build kar rahe hain
+          # Agar ye fail ho toh sirf './gradlew assembleRelease' use karein
+          ./gradlew assembleSenseVoiceRelease
 
-      - name: Upload Finished APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: SenseVoice-Model-APK
-          path: android/SherpaOnnxSenseVoice/app/build/outputs/apk/release/*.apk
+          name: SenseVoice-Android-APK
+          path: android/SherpaOnnx/app/build/outputs/apk/*/release/*.apk
