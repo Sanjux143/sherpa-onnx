@@ -2,7 +2,7 @@ name: Android Release APK (Debug Signed)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ master ]
   pull_request:
 
 jobs:
