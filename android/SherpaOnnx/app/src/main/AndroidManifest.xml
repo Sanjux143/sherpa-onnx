@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- ❌ RECORD_AUDIO removed (not needed) -->
 
     <application
         android:allowBackup="true"
@@ -14,19 +14,22 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.SherpaOnnx"
         tools:targetApi="31">
+
         <activity
             android:name=".MainActivity"
-            android:label="ASR: Next-gen Kaldi"
-            android:exported="true">
+            android:exported="true"
+            android:label="ASR: Next-gen Kaldi">
+
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- Required for sherpa-onnx native loading -->
             <meta-data
                 android:name="android.app.lib_name"
                 android:value="" />
+
         </activity>
     </application>
 
