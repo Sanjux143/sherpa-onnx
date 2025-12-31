@@ -1,4 +1,4 @@
-name: Android Release APK
+name: Android Release APK (Debug Signed)
 
 on:
   push:
@@ -33,10 +33,18 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
 
-    - name: Install Android SDK & NDK
+    - name: Install Android SDK & NDK (PINNED)
       run: |
         sdkmanager "platforms;android-${ANDROID_API}"
         sdkmanager "ndk;${ANDROID_NDK_VERSION}"
+        echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VERSION}" >> $GITHUB_ENV
+        echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VERSION}" >> $GITHUB_ENV
+
+    # ================= VERIFY NDK =================
+    - name: Verify NDK version
+      run: |
+        ls $ANDROID_NDK_HOME
+        $ANDROID_NDK_HOME/ndk-build --version
 
     # ================= BUILD SHERPA-ONNX =================
     - name: Build sherpa-onnx native libs (arm64-v8a)
@@ -44,6 +52,7 @@ jobs:
         chmod +x build-android-arm64-v8a.sh
         ./build-android-arm64-v8a.sh
 
+    # ================= COPY JNI =================
     - name: Copy JNI libraries
       run: |
         mkdir -p android/SherpaOnnx/app/src/main/jniLibs/${ABI}
@@ -56,7 +65,7 @@ jobs:
         cd android/SherpaOnnx
         ./gradlew assembleRelease
 
-    # ================= UPLOAD RELEASE APK =================
+    # ================= UPLOAD =================
     - name: Upload Release APK
       uses: actions/upload-artifact@v4
       with:
