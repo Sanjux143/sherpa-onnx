@@ -1,240 +1,223 @@
+
 package com.k2fsa.sherpa.onnx
 
-import android.Manifest
-import android.content.pm.PackageManager
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
+import android.content.ContentValues
+import android.media.*
 import android.os.Bundle
-import android.text.method.ScrollingMovementMethod
+import android.provider.MediaStore
 import android.util.Log
 import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
-import java.io.File
-import java.io.FileOutputStream
-import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.concurrent.thread
 
 private const val TAG = "sherpa-onnx"
-private const val REQUEST_RECORD_AUDIO_PERMISSION = 200
-
-// To enable microphone in android emulator, use
-//
-// adb emu avd hostmicon
 
 class MainActivity : AppCompatActivity() {
-    private val permissions: Array<String> = arrayOf(Manifest.permission.RECORD_AUDIO)
 
     private lateinit var recognizer: OnlineRecognizer
-    private var audioRecord: AudioRecord? = null
-    private lateinit var recordButton: Button
     private lateinit var textView: TextView
-    private var recordingThread: Thread? = null
+    private lateinit var startButton: Button
 
-    private val audioSource = MediaRecorder.AudioSource.MIC
-    private val sampleRateInHz = 16000
-    private val channelConfig = AudioFormat.CHANNEL_IN_MONO
+    private val sampleRate = 16000
+    private val CHUNK_SECONDS = 30f
 
-    // Note: We don't use AudioFormat.ENCODING_PCM_FLOAT
-    // since the AudioRecord.read(float[]) needs API level >= 23
-    // but we are targeting API level >= 21
-    private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-    private var idx: Int = 0
-    private var lastText: String = ""
-
-    @Volatile
-    private var isRecording: Boolean = false
-
-    override fun onRequestPermissionsResult(
-        requestCode: Int, permissions: Array<String>, grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        val permissionToRecordAccepted = if (requestCode == REQUEST_RECORD_AUDIO_PERMISSION) {
-            grantResults[0] == PackageManager.PERMISSION_GRANTED
-        } else {
-            false
-        }
-
-        if (!permissionToRecordAccepted) {
-            Log.e(TAG, "Audio record is disallowed")
-            finish()
-        }
-
-        Log.i(TAG, "Audio record is permitted")
-    }
+    data class SrtSeg(val start: Float, val end: Float, val text: String)
+    private val segments = mutableListOf<SrtSeg>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        ActivityCompat.requestPermissions(this, permissions, REQUEST_RECORD_AUDIO_PERMISSION)
-
-        Log.i(TAG, "Start to initialize model")
-        initModel()
-        Log.i(TAG, "Finished initializing model")
-
-        recordButton = findViewById(R.id.record_button)
-        recordButton.setOnClickListener { onclick() }
-
         textView = findViewById(R.id.my_text)
-        textView.movementMethod = ScrollingMovementMethod()
-    }
+        startButton = findViewById(R.id.record_button)
 
-    private fun onclick() {
-        if (!isRecording) {
-            val ret = initMicrophone()
-            if (!ret) {
-                Log.e(TAG, "Failed to initialize microphone")
-                return
-            }
-            Log.i(TAG, "state: ${audioRecord?.state}")
-            audioRecord!!.startRecording()
-            recordButton.setText(R.string.stop)
-            isRecording = true
-            textView.text = ""
-            lastText = ""
-            idx = 0
+        initModel()
 
-            recordingThread = thread(true) {
-                processSamples()
+        startButton.setOnClickListener {
+            textView.text = "Processing…"
+            segments.clear()
+            thread {
+                processFile("input.mp3") // or input.wav
             }
-            Log.i(TAG, "Started recording")
-        } else {
-            isRecording = false
-            audioRecord!!.stop()
-            audioRecord!!.release()
-            audioRecord = null
-            recordButton.setText(R.string.start)
-            Log.i(TAG, "Stopped recording")
         }
     }
 
-    private fun processSamples() {
-        Log.i(TAG, "processing samples")
+    // ================= FILE → SRT =================
+
+    private fun processFile(assetName: String) {
+        val pcm = decodeToPcm(assetName)
+        if (pcm.isEmpty()) {
+            runOnUiThread { textView.text = "Decode failed" }
+            return
+        }
+
         val stream = recognizer.createStream()
+        val chunkSamples = (sampleRate * CHUNK_SECONDS).toInt()
 
-        val interval = 0.1 // i.e., 100 ms
-        val bufferSize = (interval * sampleRateInHz).toInt() // in samples
-        val buffer = ShortArray(bufferSize)
+        var i = 0
+        var lastText = ""
+        var segStart = 0f
 
-        while (isRecording) {
-            val ret = audioRecord?.read(buffer, 0, buffer.size)
-            if (ret != null && ret > 0) {
-                val samples = FloatArray(ret) { buffer[it] / 32768.0f }
-                stream.acceptWaveform(samples, sampleRate = sampleRateInHz)
-                while (recognizer.isReady(stream)) {
-                    recognizer.decode(stream)
+        while (i < pcm.size) {
+            val end = minOf(i + chunkSamples, pcm.size)
+            val chunk = pcm.copyOfRange(i, end)
+
+            stream.acceptWaveform(chunk, sampleRate)
+
+            while (recognizer.isReady(stream)) {
+                recognizer.decode(stream)
+            }
+
+            val text = recognizer.getResult(stream).text
+            val nowSec = end / sampleRate.toFloat()
+
+            if (lastText.isBlank() && text.isNotBlank()) {
+                segStart = i / sampleRate.toFloat()
+            }
+            if (text.isNotBlank()) lastText = text
+
+            if (recognizer.isEndpoint(stream) || end == pcm.size) {
+                if (lastText.isNotBlank()) {
+                    segments.add(SrtSeg(segStart, nowSec, lastText))
                 }
+                recognizer.reset(stream)
+                lastText = ""
+            }
 
-                val isEndpoint = recognizer.isEndpoint(stream)
-                var text = recognizer.getResult(stream).text
+            i = end
+        }
 
-                // For streaming parformer, we need to manually add some
-                // paddings so that it has enough right context to
-                // recognize the last word of this segment
-                if (isEndpoint && recognizer.config.modelConfig.paraformer.encoder.isNotBlank()) {
-                    val tailPaddings = FloatArray((0.8 * sampleRateInHz).toInt())
-                    stream.acceptWaveform(tailPaddings, sampleRate = sampleRateInHz)
-                    while (recognizer.isReady(stream)) {
-                        recognizer.decode(stream)
-                    }
-                    text = recognizer.getResult(stream).text
-                }
+        stream.release()
+        saveSrtDownloads()
 
-                var textToDisplay = lastText
+        runOnUiThread {
+            textView.text = "Saved to Downloads/output.srt"
+        }
+    }
 
-                if (text.isNotBlank()) {
-                    textToDisplay = if (lastText.isBlank()) {
-                        "${idx}: $text"
-                    } else {
-                        "${lastText}\n${idx}: $text"
-                    }
-                }
+    // ================= AUDIO DECODER =================
 
-                if (isEndpoint) {
-                    recognizer.reset(stream)
-                    if (text.isNotBlank()) {
-                        lastText = "${lastText}\n${idx}: $text"
-                        textToDisplay = lastText
-                        idx += 1
-                    }
-                }
+    private fun decodeToPcm(assetName: String): FloatArray {
+        val extractor = MediaExtractor()
+        val afd = assets.openFd(assetName)
+        extractor.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
 
-                runOnUiThread {
-                    textView.text = textToDisplay
-                }
+        var trackIndex = -1
+        var format: MediaFormat? = null
+
+        for (i in 0 until extractor.trackCount) {
+            val f = extractor.getTrackFormat(i)
+            if (f.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
+                trackIndex = i
+                format = f
+                break
             }
         }
-        stream.release()
-    }
 
-    private fun initMicrophone(): Boolean {
-        if (ActivityCompat.checkSelfPermission(
-                this, Manifest.permission.RECORD_AUDIO
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            ActivityCompat.requestPermissions(this, permissions, REQUEST_RECORD_AUDIO_PERMISSION)
-            return false
+        if (trackIndex < 0 || format == null) return FloatArray(0)
+        extractor.selectTrack(trackIndex)
+
+        val codec = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME)!!)
+        codec.configure(format, null, null, 0)
+        codec.start()
+
+        val pcmList = ArrayList<Float>()
+        val info = MediaCodec.BufferInfo()
+        val buf = ByteArray(4096)
+
+        while (true) {
+            val inIdx = codec.dequeueInputBuffer(10000)
+            if (inIdx >= 0) {
+                val input = codec.getInputBuffer(inIdx)!!
+                val size = extractor.readSampleData(input, 0)
+                if (size < 0) {
+                    codec.queueInputBuffer(
+                        inIdx, 0, 0, 0,
+                        MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                    )
+                    break
+                } else {
+                    codec.queueInputBuffer(inIdx, 0, size, extractor.sampleTime, 0)
+                    extractor.advance()
+                }
+            }
+
+            val outIdx = codec.dequeueOutputBuffer(info, 10000)
+            if (outIdx >= 0) {
+                val outBuf = codec.getOutputBuffer(outIdx)!!
+                outBuf.get(buf, 0, info.size)
+                outBuf.clear()
+
+                val bb = ByteBuffer.wrap(buf, 0, info.size)
+                    .order(ByteOrder.LITTLE_ENDIAN)
+
+                while (bb.remaining() >= 2) {
+                    pcmList.add(bb.short / 32768f)
+                }
+                codec.releaseOutputBuffer(outIdx, false)
+            }
         }
 
-        val numBytes = AudioRecord.getMinBufferSize(sampleRateInHz, channelConfig, audioFormat)
-        Log.i(
-            TAG, "buffer size in milliseconds: ${numBytes * 1000.0f / sampleRateInHz}"
-        )
+        codec.stop()
+        codec.release()
+        extractor.release()
 
-        audioRecord = AudioRecord(
-            audioSource,
-            sampleRateInHz,
-            channelConfig,
-            audioFormat,
-            numBytes * 2 // a sample has two bytes as we are using 16-bit PCM
-        )
-        return true
+        return pcmList.toFloatArray()
     }
+
+    // ================= SAVE SRT ⇒ DOWNLOADS =================
+
+    private fun saveSrtDownloads() {
+        val resolver = contentResolver
+
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, "output.srt")
+            put(MediaStore.Downloads.MIME_TYPE, "application/x-subrip")
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return
+        resolver.openOutputStream(uri)?.use { os ->
+            segments.forEachIndexed { i, s ->
+                os.write("${i + 1}\n".toByteArray())
+                os.write("${fmt(s.start)} --> ${fmt(s.end)}\n".toByteArray())
+                os.write("${s.text.trim()}\n\n".toByteArray())
+            }
+        }
+
+        values.clear()
+        values.put(MediaStore.Downloads.IS_PENDING, 0)
+        resolver.update(uri, values, null, null)
+        Log.i(TAG, "SRT saved to Downloads")
+    }
+
+    private fun fmt(sec: Float): String {
+        val ms = (sec * 1000).toInt()
+        return "%02d:%02d:%02d,%03d".format(
+            ms / 3600000,
+            (ms % 3600000) / 60000,
+            (ms % 60000) / 1000,
+            ms % 1000
+        )
+    }
+
+    // ================= MODEL INIT =================
 
     private fun initModel() {
-        // Please change getModelConfig() to add new models
-        // See https://k2-fsa.github.io/sherpa/onnx/pretrained_models/index.html
-        // for a list of available models
-        val type = 0
-        var ruleFsts : String?
-        ruleFsts = null
-
-        val useHr = false
-        val hr =  HomophoneReplacerConfig(
-            // Used only when useHr is true
-            // Please download the following 3 files from
-            // https://github.com/k2-fsa/sherpa-onnx/releases/tag/hr-files
-            //
-            // dict and lexicon.txt can be shared by different apps
-            //
-            // replace.fst is specific for an app
-            lexicon = "lexicon.txt",
-            ruleFsts = "replace.fst",
-        )
-
-        Log.i(TAG, "Select model type $type")
-        var config = OnlineRecognizerConfig(
-            featConfig = getFeatureConfig(sampleRate = sampleRateInHz, featureDim = 80),
-            modelConfig = getModelConfig(type = type)!!,
-            // lmConfig = getOnlineLMConfig(type = type),
+        val config = OnlineRecognizerConfig(
+            featConfig = getFeatureConfig(sampleRate, 80),
+            modelConfig = getModelConfig(
+                modelFile = "model.int8.onnx",   // here
+                tokensFile = "tokens.txt",       // here
+                type = -1                        // custom model
+            )!!,
             endpointConfig = getEndpointConfig(),
-            enableEndpoint = true,
+            enableEndpoint = true
         )
 
-        if (ruleFsts != null) {
-            config.ruleFsts = ruleFsts
-        }
-
-        if (useHr) {
-            config.hr = hr
-        }
-
-        recognizer = OnlineRecognizer(
-            assetManager = application.assets,
-            config = config,
-        )
+        recognizer = OnlineRecognizer(assets, config)
     }
 }
